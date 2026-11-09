@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0a0b0f">
-<title>La Butaca</title>
+<title>Cinechato</title>
 <style>
   :root {
     --fondo: #0a0b0f;
@@ -217,6 +217,11 @@
     align-items: center; gap: 14px; font-weight: 600; white-space: nowrap; }
   .fila-ctl .menu-cal button.activa { background: var(--acento); color: var(--acento-txt); }
   .menu-cal small { font-weight: 500; opacity: .7; }
+  .sub { position: relative; }
+  .sub[hidden] { display: none; }
+  .fila-ctl #bSub { width: auto; border-radius: 9px; padding: 0 12px; font-weight: 700; font-size: .92rem; }
+  .fila-ctl #bSub.on { background: var(--acento); color: var(--acento-txt); }
+  #v::cue { background: rgba(0,0,0,.72); color: #fff; font-family: system-ui, sans-serif; font-weight: 600; font-size: clamp(16px, 2.6vw, 28px); }
 
   /* Botón "Siguiente video" al final de la película (arriba de la línea del tiempo) */
   .sig-final { position: absolute; right: clamp(12px, 3vw, 28px); bottom: 100px; z-index: 6; display: flex; gap: 10px; align-items: stretch; }
@@ -264,7 +269,7 @@
       <circle cx="20" cy="20" r="18" fill="url(#lg)"/>
       <g fill="#1a1405"><circle cx="20" cy="7.5" r="2.3"/><circle cx="32.5" cy="20" r="2.3"/><circle cx="20" cy="32.5" r="2.3"/><circle cx="7.5" cy="20" r="2.3"/><path d="M16.5 14.5 27 20 16.5 25.5Z"/></g>
     </svg>
-    La Butaca
+    Cinechato
   </div>
   <label class="buscador">
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -345,6 +350,10 @@
       </div>
       <span class="tiempo" id="tiempo">0:00 / 0:00</span>
       <span class="espacio"></span>
+      <div class="sub" id="sub" hidden>
+        <button id="bSub" aria-label="Subtítulos (tecla C)" title="Subtítulos (C)">CC</button>
+        <div class="menu-cal" id="menuSub" hidden></div>
+      </div>
       <div class="cal" id="cal" hidden>
         <button id="bCal" aria-label="Calidad del video">1080p</button>
         <div class="menu-cal" id="menuCal" hidden></div>
@@ -634,6 +643,7 @@ function abrir(x, lista) {
   try { clasico = localStorage.getItem('clasico:' + x.nombre) === '1'; } catch (e) {}
   aplicarClasico(clasico && document.body.classList.contains('admin'));
   pintarCal();
+  cargarSubs(ver);
   v.play().catch(function () {});
   despertar();
   pintarTiempo();
@@ -681,6 +691,143 @@ function cambiarVersion(e) {
 }
 bCal.onclick = function () { menuCal.hidden = !menuCal.hidden; };
 
+/* ---------- subtítulos (.srt o .vtt junto al video; no hace falta tocar el servidor) ---------- */
+var subGrupo = document.getElementById('sub'), bSub = document.getElementById('bSub'), menuSub = document.getElementById('menuSub');
+var SUB_SUFIJOS = [['', 'Subtítulos', 'es'], ['.es', 'Español', 'es'], ['.spa', 'Español', 'es'], ['.lat', 'Español latino', 'es'], ['.en', 'Inglés', 'en'], ['.eng', 'Inglés', 'en']];
+var subLista = [], subActivo = -1, subSesion = 0;
+
+function decodificar(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) { return new TextDecoder('windows-1252').decode(buf); }
+}
+function srtAVtt(txt) {
+  txt = txt.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  if (/^WEBVTT/.test(txt)) return txt;
+  return 'WEBVTT\n\n' + txt.replace(/\{\\[^}]*\}/g, '').replace(/(\d{1,2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+}
+function tAss(s) {
+  var m = /^(\d+):(\d{1,2}):(\d{1,2})[.:](\d{1,3})/.exec(String(s).trim());
+  if (!m) return null;
+  function dos(n) { return ('0' + n).slice(-2); }
+  return dos(m[1]) + ':' + dos(m[2]) + ':' + dos(m[3]) + '.' + (m[4] + '00').slice(0, 3);
+}
+/* .ass: se conserva solo el texto y los tiempos (sin colores, posiciones ni efectos) */
+function assAVtt(txt) {
+  var lineas = txt.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').split('\n');
+  var enEventos = false, iIni = 1, iFin = 2, iTxt = 9, n = 10, cues = [];
+  lineas.forEach(function (l) {
+    var s = l.trim();
+    if (/^\[.*\]$/.test(s)) { enEventos = /^\[events\]$/i.test(s); return; }
+    if (!enEventos) return;
+    if (/^format:/i.test(s)) {
+      var c = s.slice(7).split(',').map(function (x) { return x.trim().toLowerCase(); });
+      n = c.length; iIni = c.indexOf('start'); iFin = c.indexOf('end'); iTxt = c.indexOf('text');
+      return;
+    }
+    if (!/^dialogue:/i.test(s)) return;
+    var partes = s.slice(9).split(',');
+    if (partes.length < n) return;
+    var texto = partes.slice(iTxt).join(',');
+    if (/\{[^}]*\\p[1-9]/.test(texto)) return;
+    texto = texto.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, ' ').replace(/\\h/g, ' ').trim();
+    texto = texto.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    var a = tAss(partes[iIni]), b = tAss(partes[iFin]);
+    if (!a || !b || !texto) return;
+    cues.push({ a: a, b: b, t: texto });
+  });
+  cues.sort(function (x, y) { return x.a < y.a ? -1 : x.a > y.a ? 1 : 0; });
+  return 'WEBVTT\n\n' + cues.map(function (q) { return q.a + ' --> ' + q.b + '\n' + q.t; }).join('\n\n') + '\n';
+}
+function aVtt(txt) {
+  if (/\[events\]/i.test(txt) && /dialogue:/i.test(txt)) return assAVtt(txt);
+  return srtAVtt(txt);
+}
+function limpiarSubs() {
+  subSesion++;
+  Array.prototype.slice.call(v.querySelectorAll('track')).forEach(function (p) { p.remove(); });
+  subLista.forEach(function (s) { if (s.url) URL.revokeObjectURL(s.url); });
+  subLista = []; subActivo = -1;
+  subGrupo.hidden = true; menuSub.hidden = true;
+}
+function pintarSubs() {
+  subGrupo.hidden = !subLista.length;
+  menuSub.hidden = true;
+  if (!subLista.length) return;
+  bSub.classList.toggle('on', subActivo >= 0);
+  menuSub.innerHTML = '';
+  var no = document.createElement('button');
+  no.className = subActivo < 0 ? 'activa' : '';
+  no.textContent = 'Desactivados';
+  no.onclick = function () { elegirSub(-1); };
+  menuSub.appendChild(no);
+  subLista.forEach(function (s, i) {
+    var b = document.createElement('button');
+    b.className = i === subActivo ? 'activa' : '';
+    b.textContent = s.etq;
+    b.onclick = function () { elegirSub(i); };
+    menuSub.appendChild(b);
+  });
+}
+function colocarSub(i) {
+  Array.prototype.slice.call(v.querySelectorAll('track')).forEach(function (p) { p.remove(); });
+  subActivo = i;
+  if (i >= 0) {
+    var s = subLista[i];
+    if (!s.url) s.url = URL.createObjectURL(new Blob([s.vtt], { type: 'text/vtt' }));
+    var p = document.createElement('track');
+    p.kind = 'subtitles'; p.label = s.etq; p.srclang = s.lang; p.src = s.url; p.default = true;
+    v.appendChild(p);
+    p.track.mode = 'showing';
+  }
+  pintarSubs();
+}
+function elegirSub(i) {
+  colocarSub(i);
+  try { localStorage.setItem('sub', i >= 0 ? subLista[i].suf : 'off'); } catch (e) {}
+}
+function alternarSub() {
+  if (subLista.length) elegirSub(subActivo >= 0 ? -1 : 0);
+}
+async function cargarSubs(ver) {
+  limpiarSubs();
+  var mia = subSesion;
+  try {
+    var carp = ver.nombre.split('/').slice(0, -1).join('/');
+    carp = carp ? carp + '/' : '';
+    var base = sinExt(ver.nombre), bases = [base], limpia = sinCalidad(base);
+    if (limpia !== base) bases.push(limpia);
+    var pruebas = [];
+    bases.forEach(function (b) {
+      SUB_SUFIJOS.forEach(function (s) {
+        ['.srt', '.vtt', '.ass'].forEach(function (ext) {
+          pruebas.push({ ruta: carp + b + s[0] + ext, suf: s[0], nom: s[1], lang: s[2] });
+        });
+      });
+    });
+    var res = await Promise.all(pruebas.map(function (p) {
+      return fetch(urlVideo(p.ruta))
+        .then(function (r) { return r.ok ? r.arrayBuffer() : null; })
+        .then(function (buf) { return buf && buf.byteLength ? { p: p, buf: buf } : null; })
+        .catch(function () { return null; });
+    }));
+    if (mia !== subSesion) return;
+    var vistos = {}, usadas = {};
+    res.forEach(function (r) {
+      if (!r || vistos[r.p.suf]) return;
+      vistos[r.p.suf] = 1;
+      var etq = r.p.nom;
+      if (usadas[etq]) etq += ' (' + (r.p.suf.slice(1) || 'sin sufijo') + ')';
+      usadas[etq] = 1;
+      subLista.push({ etq: etq, suf: r.p.suf, lang: r.p.lang, vtt: aVtt(decodificar(r.buf)), url: '' });
+    });
+    var pref = null, idx = -1;
+    try { pref = localStorage.getItem('sub'); } catch (e) {}
+    if (pref && pref !== 'off') subLista.forEach(function (s, i) { if (s.suf === pref) idx = i; });
+    colocarSub(idx);
+  } catch (e) {}
+}
+bSub.onclick = function () { menuSub.hidden = !menuSub.hidden; };
+
 function aplicarClasico(on) {
   visor.classList.toggle('clasico', on);
   v.controls = on;
@@ -702,6 +849,7 @@ function cerrar() {
   if (actual && v.duration) guardar(actual.x.nombre, v.currentTime, v.duration);
   if (document.fullscreenElement) document.exitFullscreen();
   v.pause();
+  limpiarSubs();
   v.removeAttribute('src');
   v.load();
   visor.hidden = true;
@@ -818,7 +966,7 @@ function despertar() {
   visor.classList.remove('quieto');
   clearTimeout(quieto);
   quieto = setTimeout(function () {
-    if (!v.paused && !arrastrando && !sobreControlesAhora() && menuVel.hidden && menuCal.hidden) visor.classList.add('quieto');
+    if (!v.paused && !arrastrando && !sobreControlesAhora() && menuVel.hidden && menuCal.hidden && menuSub.hidden) visor.classList.add('quieto');
   }, 4000);
 }
 
@@ -1027,6 +1175,7 @@ bVel.onclick = function () { menuVel.hidden = !menuVel.hidden; };
 document.addEventListener('click', function (e) {
   if (!menuVel.hidden && !e.target.closest('.vel')) menuVel.hidden = true;
   if (!menuCal.hidden && !e.target.closest('.cal')) menuCal.hidden = true;
+  if (!menuSub.hidden && !e.target.closest('.sub')) menuSub.hidden = true;
 });
 v.addEventListener('ratechange', pintarVelocidad);
 pintarVelocidad();
@@ -1079,7 +1228,7 @@ document.addEventListener('keydown', function (e) {
   if (visor.hidden) return;
   var enCampo = e.target.tagName === 'INPUT';
   var tecla = e.key.toLowerCase();
-  if (e.key === 'Escape') { if (!menuVel.hidden) menuVel.hidden = true; else if (!menuCal.hidden) menuCal.hidden = true; else cerrar(); }
+  if (e.key === 'Escape') { if (!menuVel.hidden) menuVel.hidden = true; else if (!menuCal.hidden) menuCal.hidden = true; else if (!menuSub.hidden) menuSub.hidden = true; else cerrar(); }
   else if (enCampo) return;
   else if (e.key === 'ArrowRight') saltar(10);
   else if (e.key === 'ArrowLeft') saltar(-10);
@@ -1088,6 +1237,7 @@ document.addEventListener('keydown', function (e) {
   else if (e.key === ' ' && !/BUTTON/.test(e.target.tagName)) { e.preventDefault(); alternar(); }
   else if (tecla === 'f') alternarPantalla();
   else if (tecla === 'm') silenciar();
+  else if (tecla === 'c') alternarSub();
   else if (tecla === 'd') $('diag').hidden = !$('diag').hidden;
 });
 
